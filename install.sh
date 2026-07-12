@@ -25,8 +25,16 @@ gh auth status -h github.com >/dev/null 2>&1 || gh auth login --hostname github.
 account=$(gh api user --jq .login)
 [[ "$account" == toxyduck ]] || { echo "Expected toxyduck, got $account" >&2; exit 1; }
 mkdir -p "$HOME/dev"
-if [[ -d "$HOME/dev/.dotenv/.git" ]]; then git -C "$HOME/dev/.dotenv" pull --ff-only
-else gh repo clone toxyduck/.dotenv "$HOME/dev/.dotenv"; fi
+if [[ -d "$HOME/dev/.dotenv/.git" ]]; then
+  branch=$(git -C "$HOME/dev/.dotenv" branch --show-current)
+  if [[ "$branch" == main ]]; then
+    git -C "$HOME/dev/.dotenv" pull --ff-only origin main
+  else
+    echo "[toxy] Using existing branch $branch; origin/main was not merged."
+  fi
+else
+  gh repo clone toxyduck/.dotenv "$HOME/dev/.dotenv"
+fi
 chmod +x "$HOME/dev/.dotenv/bin/toxy" "$HOME/dev/.dotenv/vpn/start.sh"
 exec "$HOME/dev/.dotenv/bin/toxy" setup
 STAGE2
