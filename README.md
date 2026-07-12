@@ -1,6 +1,6 @@
 # toxy bootstrap
 
-Minimal Termux/Ubuntu/Debian SSH client and remote server bootstrap.
+Minimal Termux/Ubuntu/Debian SSH client (Git is installed only as a GitHub CLI runtime dependency) and remote server bootstrap.
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/toxyduck/bootstrap/main/install.sh)"
