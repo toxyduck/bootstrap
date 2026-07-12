@@ -29,21 +29,27 @@ machines_sync(){
   mkdir -p "$HOME/.ssh/config.d"; chmod 700 "$HOME/.ssh"; tmp=$(mktemp)
   { echo '# Managed by toxy'; while IFS=$'\t' read -r a h u p j; do printf '\nHost %s\n  HostName %s\n  User %s\n  Port %s\n' "$a" "$h" "$u" "$p"; [[ -z "$j" ]] || printf '  ProxyJump %s\n' "$j"; done < <(rows); } > "$tmp"
   install -m 600 "$tmp" "$SSH_FILE"; rm -f "$tmp"; touch "$HOME/.ssh/config"; chmod 600 "$HOME/.ssh/config"
-  grep -Fqx 'Include ~/.ssh/config.d/*' "$HOME/.ssh/config" || sed -i '1i Include ~/.ssh/config.d/*\n' "$HOME/.ssh/config"
+  sed -i '/^Include .*config\.d\/\*$/d' "$HOME/.ssh/config"; main_tmp=$(mktemp); { printf 'Include %s/.ssh/config.d/*\n\n' "$HOME"; cat "$HOME/.ssh/config"; } > "$main_tmp"; install -m 600 "$main_tmp" "$HOME/.ssh/config"; rm -f "$main_tmp"
   echo 'SSH presets updated'
 }
 machines_list(){ rows | awk -F '\t' '{printf "%-20s %s@%s:%s\n",$1,$3,$2,$4}'; }
+connect_machine(){
+  local alias="$1" row h u p j; row=$(rows | awk -F '\t' -v a="$alias" '$1==a {print; exit}'); [[ -n "$row" ]] || die "Unknown alias: $alias"
+  IFS=$'\t' read -r _ h u p j <<< "$row"; local -a args=(-p "$p"); [[ -z "$j" ]] || args+=(-J "$j"); exec ssh "${args[@]}" "$u@$h"
+}
 choose(){ machines_list >&2; read -r -p 'Machine alias or user@ip: ' target </dev/tty; [[ -n "$target" ]] || die 'Target required'; echo "$target"; }
 setup_target(){
-  target=; local_mode=0; vpn=
+  local target="" local_mode=0 vpn="" row h u p j; local -a args=()
   while (($#)); do case "$1" in --local) local_mode=1;; --vpn) vpn=--vpn;; *) [[ -z "$target" ]] || die 'One target only'; target="$1";; esac; shift; done
   if ((local_mode)); then bash -c "$(curl -fsSL "$SERVER_URL")" -- "$vpn"; return; fi
   [[ -n "$target" ]] || target=$(choose)
-  ssh -t "$target" "bash -c \"\$(curl -fsSL '$SERVER_URL')\" -- $vpn"
+  row=$(rows | awk -F '\t' -v a="$target" '$1==a {print; exit}')
+  if [[ -n "$row" ]]; then IFS=$'\t' read -r _ h u p j <<< "$row"; args=(-p "$p"); [[ -z "$j" ]] || args+=(-J "$j"); target="$u@$h"; fi
+  ssh "${args[@]}" -t "$target" "curl -fsSL '$SERVER_URL' | bash -s -- $vpn"
 }
 case "${1:-help}" in
   help|-h|--help) help_text;;
-  machines) case "${2:-list}" in sync) machines_sync;; list) machines_list;; connect) [[ -n "${3:-}" ]] || die 'Alias required'; exec ssh "$3";; *) die 'Use sync, list or connect';; esac;;
+  machines) case "${2:-list}" in sync) machines_sync;; list) machines_list;; connect) [[ -n "${3:-}" ]] || die 'Alias required'; connect_machine "$3";; *) die 'Use sync, list or connect';; esac;;
   setup) shift; setup_target "$@";;
   *) help_text >&2; exit 1;;
 esac
