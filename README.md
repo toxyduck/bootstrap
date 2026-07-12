@@ -1,6 +1,6 @@
 # toxy bootstrap
 
-Minimal Ubuntu/Debian SSH client and remote server bootstrap.
+Minimal Termux/Ubuntu/Debian SSH client and remote server bootstrap.
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/toxyduck/bootstrap/main/install.sh)"
