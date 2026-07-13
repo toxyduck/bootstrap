@@ -24,7 +24,7 @@ auth(){
 rows(){
   local file
   if [[ -n "${TOXY_INVENTORY_FILE:-}" ]]; then file="$TOXY_INVENTORY_FILE"
-  else auth; mkdir -p "$STATE"; file="$STATE/machines.toml"; gh api "repos/$REPO/contents/config/machines.toml" --jq .content | base64 -d > "$file"; fi
+  else auth; mkdir -p "$STATE"; file="$STATE/machines.toml"; gh api "repos/$REPO/contents/config/machines.toml" --jq .content | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read()))' > "$file"; fi
   python3 - "$file" <<'PY'
 import sys,tomllib
 for m in tomllib.load(open(sys.argv[1],'rb')).get('machines',[]):
@@ -35,7 +35,9 @@ machines_sync(){
   mkdir -p "$HOME/.ssh/config.d"; chmod 700 "$HOME/.ssh"; tmp=$(mktemp)
   { echo '# Managed by toxy'; while IFS=$'\t' read -r a h u p j; do printf '\nHost %s\n  HostName %s\n  User %s\n  Port %s\n' "$a" "$h" "$u" "$p"; [[ -z "$j" ]] || printf '  ProxyJump %s\n' "$j"; done < <(rows); } > "$tmp"
   install -m 600 "$tmp" "$SSH_FILE"; rm -f "$tmp"; touch "$HOME/.ssh/config"; chmod 600 "$HOME/.ssh/config"
-  sed -i '/^Include .*config\.d\/\*$/d' "$HOME/.ssh/config"; main_tmp=$(mktemp); { printf 'Include %s/.ssh/config.d/*\n\n' "$HOME"; cat "$HOME/.ssh/config"; } > "$main_tmp"; install -m 600 "$main_tmp" "$HOME/.ssh/config"; rm -f "$main_tmp"
+  filtered_tmp=$(mktemp); sed "/^Include .*config\.d\/\*$/d" "$HOME/.ssh/config" > "$filtered_tmp"
+  main_tmp=$(mktemp); { printf "Include %s/.ssh/config.d/*\n\n" "$HOME"; cat "$filtered_tmp"; } > "$main_tmp"
+  install -m 600 "$main_tmp" "$HOME/.ssh/config"; rm -f "$filtered_tmp" "$main_tmp"
   echo 'SSH presets updated'
 }
 machines_list(){ rows | awk -F '\t' '{printf "%-20s %s@%s:%s\n",$1,$3,$2,$4}'; }
