@@ -6,11 +6,11 @@ IS_TERMUX=0
 
 if [[ -n "${TERMUX_VERSION:-}" || "${PREFIX:-}" == *com.termux* ]]; then
   IS_TERMUX=1
-  pkg update -y
+  apt-get update
   # Termux is a rolling release and does not support partial upgrades. Keep the
   # bootstrap libraries coherent before installing packages such as curl.
-  pkg upgrade -y
-  pkg install -y ca-certificates curl git gh openssh python
+  apt-get full-upgrade -y
+  apt-get install -y ca-certificates curl git gh openssh python
   INSTALL_DIR="$PREFIX/bin"
 elif [[ "$(uname -s)" == Darwin ]]; then
   [[ ${EUID:-$(id -u)} -ne 0 ]] || { echo 'Run as a normal user, not root.' >&2; exit 1; }
