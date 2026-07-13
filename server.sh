@@ -69,6 +69,7 @@ gh auth setup-git
 [[ \$(gh api user --jq .login) == toxyduck ]] || { echo 'Use GitHub account toxyduck' >&2; exit 1; }
 mkdir -p "\$(dirname "\$root")"
 if [[ -d "\$root/.git" ]]; then
+  git -C "\$root" remote set-url origin https://github.com/toxyduck/.dotenv.git
   branch=\$(git -C "\$root" branch --show-current)
   [[ "\$branch" != main ]] || git -C "\$root" pull --ff-only origin main
 else

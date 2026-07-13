@@ -51,6 +51,7 @@ for m in machines:
         m.get('proxy_jump', '-'),
         profile,
         '1' if has_hostname else '0',
+        '1' if profile == 'yandex' and has_hostname else '0',
     ]
     print('\t'.join(values))
 PY
@@ -58,10 +59,11 @@ PY
 machine_row(){ rows | awk -F '\t' -v a="$1" '$1==a {print; exit}'; }
 machines_sync(){
   mkdir -p "$HOME/.ssh/config.d"; chmod 700 "$HOME/.ssh"; tmp=$(mktemp)
-  { echo '# Managed by toxy'; while IFS=$'\t' read -r a h u p j profile remote; do
+  { echo '# Managed by toxy'; while IFS=$'\t' read -r a h u p j profile remote forward; do
       [[ "$remote" == 0 ]] && continue
       printf '\nHost %s\n  HostName %s\n  User %s\n  Port %s\n  SetEnv TERM=%s\n' "$a" "$h" "$u" "$p" "$REMOTE_TERM"
       [[ "$j" == - ]] || printf '  ProxyJump %s\n' "$j"
+      [[ "$forward" == 0 ]] || printf '  ForwardAgent yes\n'
     done < <(rows); } > "$tmp"
   install -m 600 "$tmp" "$SSH_FILE"; rm -f "$tmp"; touch "$HOME/.ssh/config"; chmod 600 "$HOME/.ssh/config"
   filtered_tmp=$(mktemp); sed "/^Include .*config\.d\/\*$/d" "$HOME/.ssh/config" > "$filtered_tmp"
@@ -70,24 +72,25 @@ machines_sync(){
   echo 'SSH presets updated'
 }
 machines_list(){
-  while IFS=$'\t' read -r a h u p _ profile remote; do
+  while IFS=$'\t' read -r a h u p _ profile remote _; do
     if [[ "$remote" == 0 ]]; then printf '%-20s profile-only  profile=%s\n' "$a" "$profile"
     else printf '%-20s %s@%s:%s  profile=%s\n' "$a" "$u" "$h" "$p" "$profile"; fi
   done < <(rows)
 }
 connect_machine(){
-  local alias="$1" row h u p j profile remote
+  local alias="$1" row h u p j profile remote forward
   row=$(machine_row "$alias"); [[ -n "$row" ]] || die "Unknown alias: $alias"
-  IFS=$'\t' read -r _ h u p j profile remote <<< "$row"
+  IFS=$'\t' read -r _ h u p j profile remote forward <<< "$row"
   [[ "$remote" == 1 ]] || die "Machine $alias has no SSH endpoint"
   local -a args=(-p "$p" -o "SetEnv=TERM=$REMOTE_TERM"); [[ "$j" == - ]] || args+=(-J "$j")
+  [[ "$forward" == 0 ]] || args+=(-A)
   exec ssh "${args[@]}" "$u@$h"
 }
 choose(){ machines_list >&2; read -r -p 'Machine alias or user@ip: ' target </dev/tty; [[ -n "$target" ]] || die 'Target required'; echo "$target"; }
 run_local_setup(){
   local alias="$1" vpn="$2" row profile remote tmp
   row=$(machine_row "$alias"); [[ -n "$row" ]] || die "Unknown alias: $alias"
-  IFS=$'\t' read -r _ _ _ _ _ profile remote <<< "$row"
+  IFS=$'\t' read -r _ _ _ _ _ profile remote _ <<< "$row"
   local result
   tmp=$(mktemp)
   curl -fsSL "$SERVER_URL" -o "$tmp"
@@ -100,16 +103,17 @@ run_local_setup(){
   return "$result"
 }
 setup_target(){
-  local target="" local_mode=0 vpn="" row h u p j profile remote; local -a args=()
+  local target="" local_mode=0 vpn="" row h u p j profile remote forward; local -a args=()
   while (($#)); do case "$1" in --local) local_mode=1;; --vpn) vpn=--vpn;; *) [[ -z "$target" ]] || die 'One target only'; target="$1";; esac; shift; done
   if ((local_mode)); then [[ -n "$target" ]] || die 'Local setup requires an alias: toxy setup --local <alias>'; run_local_setup "$target" "$vpn"; return; fi
   [[ -n "$target" ]] || target=$(choose)
   profile=base
   row=$(machine_row "$target")
   if [[ -n "$row" ]]; then
-    IFS=$'\t' read -r _ h u p j profile remote <<< "$row"
+    IFS=$'\t' read -r _ h u p j profile remote forward <<< "$row"
     [[ "$remote" == 1 ]] || die "Machine $target has no SSH endpoint; use --local"
     args=(-p "$p"); [[ "$j" == - ]] || args+=(-J "$j"); target="$u@$h"
+    [[ "$forward" == 0 ]] || args+=(-A)
   fi
   args+=(-o "SetEnv=TERM=$REMOTE_TERM")
   ssh "${args[@]}" -t "$target" "tmp=\$(mktemp) && trap 'rm -f \"\$tmp\"' EXIT && curl -fsSL '$SERVER_URL' -o \"\$tmp\" && bash \"\$tmp\" --profile '$profile' $vpn"
