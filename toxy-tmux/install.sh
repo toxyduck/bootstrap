@@ -7,6 +7,11 @@ BASE_URL="${TOXY_TMUX_BASE_URL:-https://raw.githubusercontent.com/toxyduck/boots
   exit 1
 }
 
+if [[ "${TOXY_TERMUX_PACKAGES_READY:-0}" != 1 ]]; then
+  pkg update -y
+  # Standalone installs must also avoid a partial Termux package upgrade.
+  pkg upgrade -y
+fi
 pkg install -y tmux openssh python termux-services
 
 tmp=$(mktemp)

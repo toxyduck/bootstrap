@@ -7,6 +7,9 @@ IS_TERMUX=0
 if [[ -n "${TERMUX_VERSION:-}" || "${PREFIX:-}" == *com.termux* ]]; then
   IS_TERMUX=1
   pkg update -y
+  # Termux is a rolling release and does not support partial upgrades. Keep the
+  # bootstrap libraries coherent before installing packages such as curl.
+  pkg upgrade -y
   pkg install -y ca-certificates curl git gh openssh python
   INSTALL_DIR="$PREFIX/bin"
 elif [[ "$(uname -s)" == Darwin ]]; then
@@ -48,7 +51,7 @@ if ((IS_TERMUX)); then
   package_installer=$(mktemp)
   curl -fsSL "$TOXY_TMUX_INSTALL_URL" -o "$package_installer"
   bash -n "$package_installer"
-  bash "$package_installer"
+  TOXY_TERMUX_PACKAGES_READY=1 bash "$package_installer"
   rm -f "$package_installer"
 fi
 echo 'Client ready. Run: toxy help'
