@@ -7,6 +7,7 @@ VPN="${1:-}"
 source /etc/os-release
 case "$ID" in ubuntu|debian) ;; *) echo 'Ubuntu/Debian required' >&2; exit 1;; esac
 sudo apt-get update
+sudo DEBIAN_FRONTEND=noninteractive apt-get --fix-broken install -y
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tmux curl ca-certificates
 mkdir -p "$STATE/logs"; chmod 700 "$STATE" "$STATE/logs"
 tmux has-session -t "$SESSION" 2>/dev/null && exec tmux attach-session -t "$SESSION"
