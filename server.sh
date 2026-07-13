@@ -39,6 +39,9 @@ case "$(uname -s)" in
 esac
 
 mkdir -p "$STATE/logs"; chmod 700 "$STATE" "$STATE/logs"
+if [[ -n "${SSH_AUTH_SOCK:-}" ]] && tmux list-sessions >/dev/null 2>&1; then
+  tmux set-environment -g SSH_AUTH_SOCK "$SSH_AUTH_SOCK"
+fi
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   if [[ $(tmux display-message -p -t "$SESSION" '#{pane_dead}') == 1 ]]; then tmux kill-session -t "$SESSION"
   else exec tmux attach-session -t "$SESSION"; fi
