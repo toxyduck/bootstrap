@@ -1,0 +1,400 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+VERSION=0.1.0
+SELF=$(cd -P "$(dirname "$0")" && pwd)/$(basename "$0")
+STATE_DIR="${TOXY_TMUX_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/toxy-tmux}"
+RUN_DIR="$STATE_DIR/run"
+SESSIONS_DIR="$STATE_DIR/sessions"
+SUPPRESSED_DIR="$STATE_DIR/suppressed"
+SERVERS_DIR="$STATE_DIR/servers"
+SSH_DIR="$STATE_DIR/ssh"
+MACHINES_FILE="$STATE_DIR/machines.list"
+STATUS_FILE="$STATE_DIR/status.json"
+PID_FILE="$RUN_DIR/watcher.pid"
+TOXY_BIN="${TOXY_TMUX_TOXY_BIN:-toxy}"
+SSH_BIN="${TOXY_TMUX_SSH_BIN:-ssh}"
+AM_BIN="${TOXY_TMUX_AM_BIN:-am}"
+PYTHON_BIN="${TOXY_TMUX_PYTHON_BIN:-python3}"
+POLL_SECONDS="${TOXY_TMUX_POLL_SECONDS:-5}"
+RETRY_SECONDS="${TOXY_TMUX_RETRY_SECONDS:-30}"
+PREFIX_DIR="${PREFIX:-/data/data/com.termux/files/usr}"
+TERMUX_PACKAGE="${TOXY_TMUX_TERMUX_PACKAGE:-com.termux}"
+LOG_FILE="$PREFIX_DIR/var/log/sv/toxy-tmux/current"
+
+log() { printf '[toxy-tmux] %s\n' "$*"; }
+warn() { printf '[toxy-tmux] WARNING: %s\n' "$*" >&2; }
+die() { printf '[toxy-tmux] ERROR: %s\n' "$*" >&2; exit 1; }
+
+init_state() {
+  mkdir -p "$RUN_DIR" "$SESSIONS_DIR" "$SUPPRESSED_DIR" "$SERVERS_DIR" "$SSH_DIR"
+  chmod 700 "$STATE_DIR" "$RUN_DIR" "$SESSIONS_DIR" "$SUPPRESSED_DIR" "$SERVERS_DIR" "$SSH_DIR"
+}
+
+write_status_file() {
+  local path="$1" state="$2" message="$3" tmp
+  tmp=$(mktemp "$path.XXXXXX")
+  STATUS_STATE="$state" STATUS_MESSAGE="$message" "$PYTHON_BIN" - "$tmp" <<'PY'
+import json, os, sys, time
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    json.dump({
+        "state": os.environ["STATUS_STATE"],
+        "message": os.environ["STATUS_MESSAGE"],
+        "updated_at": int(time.time()),
+    }, f, separators=(",", ":"))
+    f.write("\n")
+PY
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$path"
+}
+
+write_status() { write_status_file "$STATUS_FILE" "$1" "$2"; }
+write_server_status() { write_status_file "$SERVERS_DIR/$1.json" "$2" "$3"; }
+
+command_exists() {
+  if [[ "$1" == */* ]]; then [[ -x "$1" ]]; else command -v "$1" >/dev/null 2>&1; fi
+}
+
+load_machines() {
+  init_state
+  if ! command_exists "$TOXY_BIN"; then
+    write_status blocked 'toxy command not found; install the toxy bootstrap'
+    warn 'toxy command not found; install the toxy bootstrap. No fallback inventory will be used.'
+    return 1
+  fi
+  local json err aliases
+  json=$(mktemp "$RUN_DIR/machines.json.XXXXXX")
+  err=$(mktemp "$RUN_DIR/machines.error.XXXXXX")
+  aliases=$(mktemp "$RUN_DIR/machines.list.XXXXXX")
+  if ! TOXY_NONINTERACTIVE=1 "$TOXY_BIN" machines list --format=json >"$json" 2>"$err"; then
+    local message
+    message=$(tr '\n' ' ' <"$err")
+    rm -f "$json" "$err" "$aliases"
+    write_status blocked "toxy machines list failed: ${message:-unknown error}"
+    warn "toxy machines list failed: ${message:-unknown error}. No fallback inventory will be used."
+    return 1
+  fi
+  if ! "$PYTHON_BIN" - "$json" >"$aliases" <<'PY'
+import json, re, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+if data.get("schema_version") != 1 or not isinstance(data.get("machines"), list):
+    raise SystemExit("unsupported toxy machines JSON schema")
+for machine in data["machines"]:
+    alias = machine.get("alias")
+    if not isinstance(alias, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", alias):
+        raise SystemExit(f"invalid machine alias: {alias!r}")
+    if machine.get("has_ssh_endpoint") is True:
+        print(alias)
+PY
+  then
+    rm -f "$json" "$err" "$aliases"
+    write_status blocked 'installed toxy does not provide the supported machines JSON schema; rerun the bootstrap'
+    warn 'Installed toxy is incompatible; rerun the bootstrap. No fallback inventory will be used.'
+    return 1
+  fi
+  chmod 600 "$aliases"
+  mv -f "$aliases" "$MACHINES_FILE"
+  rm -f "$json" "$err"
+  write_status running "loaded $(wc -l <"$MACHINES_FILE" | tr -d ' ') SSH machines"
+}
+
+identity_hash() {
+  TOXY_TMUX_IDENTITY="$1|$2|$3" "$PYTHON_BIN" -c 'import hashlib,os; print(hashlib.sha256(os.environ["TOXY_TMUX_IDENTITY"].encode()).hexdigest()[:24])'
+}
+
+safe_session_name() {
+  TOXY_TMUX_NAME="$2" TOXY_TMUX_ALIAS="$1" TOXY_TMUX_SID="$3" "$PYTHON_BIN" -c '
+import os, re
+alias = os.environ["TOXY_TMUX_ALIAS"]
+name = re.sub(r"[\x00-\x1f\x7f/]+", "_", os.environ["TOXY_TMUX_NAME"]).strip() or "unnamed"
+name = name[:48]
+sid = os.environ["TOXY_TMUX_SID"]
+print(f"{alias}/{name} [{sid}]")
+'
+}
+
+open_session() {
+  local alias="$1" sid="$2" created="$3" identity="$4" shell_name="$5" args
+  args="attach,$alias,$sid,$created,$identity"
+  if ! "$AM_BIN" startservice --user 0 \
+      -n "$TERMUX_PACKAGE/com.termux.app.RunCommandService" \
+      -a "$TERMUX_PACKAGE.RUN_COMMAND" \
+      --es "$TERMUX_PACKAGE.RUN_COMMAND_PATH" "$SELF" \
+      --esa "$TERMUX_PACKAGE.RUN_COMMAND_ARGUMENTS" "$args" \
+      --es "$TERMUX_PACKAGE.RUN_COMMAND_RUNNER" terminal-session \
+      --es "$TERMUX_PACKAGE.RUN_COMMAND_SHELL_NAME" "$shell_name" \
+      --es "$TERMUX_PACKAGE.RUN_COMMAND_SHELL_CREATE_MODE" no-shell-with-name \
+      --es "$TERMUX_PACKAGE.RUN_COMMAND_SESSION_ACTION" 3 >/dev/null; then
+    warn "Unable to open Termux session $shell_name"
+    return 1
+  fi
+}
+
+ensure_session() {
+  local alias="$1" sid="$2" created="$3" name="$4" identity record shell_name tmp
+  identity=$(identity_hash "$alias" "$sid" "$created")
+  record="$SESSIONS_DIR/$identity"
+  if [[ ! -f "$record" ]]; then
+    shell_name=$(safe_session_name "$alias" "$name" "$sid")
+    tmp=$(mktemp "$record.XXXXXX")
+    printf '%s\n%s\n%s\n%s\n' "$alias" "$sid" "$created" "$shell_name" >"$tmp"
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$record"
+  else
+    shell_name=$(sed -n '4p' "$record")
+  fi
+  touch "$RUN_DIR/seen-$identity"
+  [[ ! -f "$SUPPRESSED_DIR/$identity" ]] || return 0
+  open_session "$alias" "$sid" "$created" "$identity" "$shell_name"
+}
+
+cleanup_missing_sessions() {
+  local alias="$1" record identity record_alias
+  for record in "$SESSIONS_DIR"/*; do
+    [[ -f "$record" ]] || continue
+    identity=${record##*/}
+    read -r record_alias <"$record" || true
+    [[ "$record_alias" == "$alias" ]] || continue
+    if [[ ! -f "$RUN_DIR/seen-$identity" ]]; then
+      rm -f "$record" "$SUPPRESSED_DIR/$identity"
+    fi
+  done
+}
+
+discover_machine() {
+  local alias="$1" output error rc=0 sep remote sid created name count=0
+  output=$(mktemp "$RUN_DIR/discovery.$alias.XXXXXX")
+  error=$(mktemp "$RUN_DIR/discovery.$alias.error.XXXXXX")
+  sep=$'\037'
+  remote="command -v tmux >/dev/null 2>&1 || exit 127; tmux list-sessions -F '#{session_id}${sep}#{session_created}${sep}#{session_name}' 2>/dev/null || test \$? -eq 1"
+  if "$SSH_BIN" \
+      -o BatchMode=yes \
+      -o ConnectTimeout=10 \
+      -o ServerAliveInterval=15 \
+      -o ServerAliveCountMax=2 \
+      -o ControlMaster=auto \
+      -o ControlPersist=60 \
+      -o "ControlPath=$SSH_DIR/%C" \
+      "$alias" "$remote" >"$output" 2>"$error"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if ((rc != 0)); then
+    local message
+    message=$(tr '\n' ' ' <"$error")
+    case "$rc" in
+      127) write_server_status "$alias" unavailable 'tmux is not installed on the remote machine';;
+      255) write_server_status "$alias" unreachable "SSH connection failed: ${message:-unknown error}";;
+      *) write_server_status "$alias" error "session discovery failed with status $rc: ${message:-unknown error}";;
+    esac
+    rm -f "$output" "$error"
+    return 1
+  fi
+  rm -f "$RUN_DIR"/seen-* 2>/dev/null || true
+  while IFS=$'\037' read -r sid created name; do
+    [[ -n "$sid" ]] || continue
+    if [[ ! "$sid" =~ ^\$[0-9]+$ || ! "$created" =~ ^[0-9]+$ ]]; then
+      warn "Ignoring malformed tmux session from $alias"
+      continue
+    fi
+    ensure_session "$alias" "$sid" "$created" "$name"
+    count=$((count + 1))
+  done <"$output"
+  cleanup_missing_sessions "$alias"
+  write_server_status "$alias" ok "$count tmux sessions"
+  rm -f "$output" "$error" "$RUN_DIR"/seen-* 2>/dev/null || true
+}
+
+sync_loaded_machines() {
+  local alias failures=0
+  [[ -f "$MACHINES_FILE" ]] || return 1
+  while IFS= read -r alias; do
+    [[ -n "$alias" ]] || continue
+    discover_machine "$alias" || failures=$((failures + 1))
+  done <"$MACHINES_FILE"
+  if ((failures == 0)); then
+    write_status running 'remote tmux sessions synchronized'
+  else
+    write_status degraded "$failures machines could not be synchronized"
+  fi
+}
+
+sync_once() {
+  load_machines || return 1
+  sync_loaded_machines
+}
+
+watch() {
+  init_state
+  if [[ -f "$PID_FILE" ]]; then
+    local old_pid
+    read -r old_pid <"$PID_FILE" || true
+    [[ ! "$old_pid" =~ ^[0-9]+$ ]] || ! kill -0 "$old_pid" 2>/dev/null || die "watcher already running with pid $old_pid"
+  fi
+  printf '%s\n' "$$" >"$PID_FILE"
+  chmod 600 "$PID_FILE"
+  local reload=1 stopping=0
+  trap 'reload=1' HUP
+  trap 'stopping=1' INT TERM
+  trap 'rm -f "$PID_FILE"' EXIT
+  log 'watcher started'
+  while ((stopping == 0)); do
+    if ((reload != 0)); then
+      reload=0
+      if ! load_machines; then
+        sleep "$RETRY_SECONDS" || true
+        reload=1
+        continue
+      fi
+    fi
+    sync_loaded_machines || true
+    sleep "$POLL_SECONDS" || true
+  done
+  write_status stopped 'watcher stopped'
+}
+
+mark_suppressed() {
+  local identity="$1"
+  init_state
+  : >"$SUPPRESSED_DIR/$identity"
+  chmod 600 "$SUPPRESSED_DIR/$identity"
+}
+
+attach_session() {
+  local alias="${1:-}" sid="${2:-}" created="${3:-}" identity="${4:-}"
+  [[ "$alias" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die 'invalid machine alias'
+  [[ "$sid" =~ ^\$[0-9]+$ ]] || die 'invalid tmux session id'
+  [[ "$created" =~ ^[0-9]+$ && "$identity" =~ ^[a-f0-9]{24}$ ]] || die 'invalid tmux session identity'
+  init_state
+  trap 'mark_suppressed "$identity"; exit 0' HUP INT TERM
+  local delay=2 rc check_rc remote
+  remote="exec tmux attach-session -t '$sid'"
+  while true; do
+    if "$SSH_BIN" -tt \
+        -o ConnectTimeout=10 \
+        -o ServerAliveInterval=15 \
+        -o ServerAliveCountMax=2 \
+        -o ControlMaster=auto \
+        -o ControlPersist=60 \
+        -o "ControlPath=$SSH_DIR/%C" \
+        "$alias" "$remote"; then rc=0; else rc=$?; fi
+    if ((rc == 255)); then
+      printf '\r\n[toxy-tmux] Connection lost; reconnecting in %ss…\r\n' "$delay"
+      sleep "$delay"
+      ((delay < 30)) && delay=$((delay * 2))
+      ((delay > 30)) && delay=30
+      continue
+    fi
+    if "$SSH_BIN" -o BatchMode=yes -o ConnectTimeout=10 "$alias" "tmux has-session -t '$sid'" >/dev/null 2>&1; then
+      mark_suppressed "$identity"
+      printf '\r\n[toxy-tmux] Detached. Run toxy-tmux refresh to reopen this session.\r\n'
+      return 0
+    else
+      check_rc=$?
+    fi
+    if ((check_rc == 255)); then
+      printf '\r\n[toxy-tmux] Unable to verify the session; reconnecting in %ss…\r\n' "$delay"
+      sleep "$delay"
+      continue
+    fi
+    rm -f "$SUPPRESSED_DIR/$identity"
+    printf '\r\n[toxy-tmux] Remote tmux session no longer exists.\r\n'
+    return 0
+  done
+}
+
+refresh() {
+  init_state
+  command_exists "$TOXY_BIN" || die 'toxy command not found; install the toxy bootstrap'
+  "$TOXY_BIN" machines sync
+  rm -f "$SUPPRESSED_DIR"/*
+  if [[ -f "$PID_FILE" ]]; then
+    local pid
+    read -r pid <"$PID_FILE" || true
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      kill -HUP "$pid"
+      log 'machine inventory reloaded and suppressed sessions cleared'
+      return
+    fi
+  fi
+  sync_once
+}
+
+show_status() {
+  init_state
+  if [[ ! -f "$STATUS_FILE" ]]; then
+    printf 'toxy-tmux: stopped (no status recorded)\n'
+    return
+  fi
+  "$PYTHON_BIN" - "$STATUS_FILE" "$SERVERS_DIR" <<'PY'
+import glob, json, os, sys, time
+def read(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+status = read(sys.argv[1])
+stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(status["updated_at"]))
+print(f'toxy-tmux: {status["state"]} — {status["message"]} ({stamp})')
+for path in sorted(glob.glob(os.path.join(sys.argv[2], "*.json"))):
+    item = read(path)
+    print(f'  {os.path.basename(path)[:-5]}: {item["state"]} — {item["message"]}')
+PY
+}
+
+doctor() {
+  local failed=0 json
+  if [[ -n "${TERMUX_VERSION:-}" || ( -n "${PREFIX:-}" && "$PREFIX" == *com.termux* ) ]]; then
+    printf 'ok: Termux environment\n'
+  else
+    printf 'error: this package must run inside Termux\n'; failed=1
+  fi
+  if command_exists "$TOXY_BIN"; then
+    if json=$("$TOXY_BIN" machines list --format=json 2>&1) && JSON="$json" "$PYTHON_BIN" -c 'import json,os; assert json.loads(os.environ["JSON"])["schema_version"] == 1'; then
+      printf 'ok: toxy machines JSON schema 1\n'
+    else
+      printf 'error: toxy is installed but machine discovery failed: %s\n' "$json"; failed=1
+    fi
+  else
+    printf 'error: toxy command not found; install the toxy bootstrap\n'; failed=1
+  fi
+  command_exists "$SSH_BIN" && printf 'ok: ssh\n' || { printf 'error: ssh not found\n'; failed=1; }
+  command_exists "$AM_BIN" && printf 'ok: Android activity manager\n' || { printf 'error: am not found\n'; failed=1; }
+  if grep -Eq '^[[:space:]]*allow-external-apps[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$HOME/.termux/termux.properties" 2>/dev/null; then
+    printf 'ok: allow-external-apps=true\n'
+  else
+    printf 'error: allow-external-apps=true is not configured\n'; failed=1
+  fi
+  [[ -x "$PREFIX_DIR/var/service/toxy-tmux/run" ]] && printf 'ok: termux-services entry\n' || { printf 'error: service entry not installed\n'; failed=1; }
+  return "$failed"
+}
+
+show_logs() {
+  [[ -f "$LOG_FILE" ]] || die "service log not found: $LOG_FILE"
+  tail -n 100 "$LOG_FILE"
+}
+
+help_text() {
+  cat <<'EOF'
+toxy-tmux
+  toxy-tmux status       Show watcher and per-machine state
+  toxy-tmux refresh      Sync toxy machines and reopen manually closed sessions
+  toxy-tmux doctor       Validate Termux, toxy, SSH and service setup
+  toxy-tmux logs         Show the latest service log lines
+  toxy-tmux sync-once    Run one foreground synchronization
+  toxy-tmux version
+EOF
+}
+
+case "${1:-help}" in
+  watch) watch;;
+  sync-once) sync_once;;
+  attach) shift; attach_session "$@";;
+  refresh) refresh;;
+  status) show_status;;
+  doctor) doctor;;
+  logs) show_logs;;
+  version|--version) printf 'toxy-tmux %s\n' "$VERSION";;
+  help|-h|--help) help_text;;
+  *) help_text >&2; exit 1;;
+esac

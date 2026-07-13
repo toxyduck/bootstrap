@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 TOXY_URL="${TOXY_URL:-https://raw.githubusercontent.com/toxyduck/bootstrap/main/toxy}"
+TOXY_TMUX_INSTALL_URL="${TOXY_TMUX_INSTALL_URL:-https://raw.githubusercontent.com/toxyduck/bootstrap/main/toxy-tmux/install.sh}"
+IS_TERMUX=0
 
 if [[ -n "${TERMUX_VERSION:-}" || "${PREFIX:-}" == *com.termux* ]]; then
+  IS_TERMUX=1
   pkg update -y
   pkg install -y ca-certificates curl git gh openssh python
   INSTALL_DIR="$PREFIX/bin"
@@ -41,4 +44,11 @@ mkdir -p "$INSTALL_DIR"
 curl -fsSL "$TOXY_URL" -o "$INSTALL_DIR/toxy"
 chmod 755 "$INSTALL_DIR/toxy"
 "$INSTALL_DIR/toxy" machines sync
+if ((IS_TERMUX)); then
+  package_installer=$(mktemp)
+  curl -fsSL "$TOXY_TMUX_INSTALL_URL" -o "$package_installer"
+  bash -n "$package_installer"
+  bash "$package_installer"
+  rm -f "$package_installer"
+fi
 echo 'Client ready. Run: toxy help'

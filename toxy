@@ -47,7 +47,7 @@ self_update(){
 help_text(){ cat <<'EOF'
 toxy
   toxy machines sync
-  toxy machines list
+  toxy machines list [--format=human|json]
   toxy machines connect <alias>
   toxy setup [alias|user@ip] [--vpn]
   toxy setup --local <alias> [--vpn]
@@ -55,6 +55,7 @@ EOF
 }
 auth(){
   if ! gh auth status -h github.com >/dev/null 2>&1; then
+    [[ "${TOXY_NONINTERACTIVE:-}" != 1 && -t 0 && -t 1 ]] || die 'GitHub authentication required; run toxy machines sync interactively'
     gh auth login --hostname github.com --web
     gh config set -h github.com git_protocol https 2>/dev/null || gh config set git_protocol https
   fi
@@ -110,10 +111,55 @@ machines_sync(){
   echo 'SSH presets updated'
 }
 machines_list(){
+  local format=human row_data
+  while (($#)); do
+    case "$1" in
+      --format=json) format=json;;
+      --format=human) format=human;;
+      --format)
+        shift
+        [[ $# -gt 0 ]] || die 'Missing value for machines list --format'
+        format="$1"
+        ;;
+      *) die "Unknown machines list argument: $1";;
+    esac
+    shift
+  done
+  case "$format" in
+    human|json) ;;
+    *) die "Unsupported machines list format: $format";;
+  esac
+  if ! row_data=$(rows); then return 1; fi
+  if [[ "$format" == json ]]; then
+    printf '%s' "$row_data" | python3 -c '
+import json, sys
+
+machines = []
+for raw in sys.stdin:
+    fields = raw.rstrip("\n").split("\t")
+    if len(fields) != 8:
+        raise SystemExit("invalid machine row")
+    alias, hostname, user, port, proxy_jump, profile, remote, forward = fields
+    machines.append({
+        "alias": alias,
+        "hostname": None if hostname == "-" else hostname,
+        "user": None if user == "-" else user,
+        "port": int(port),
+        "proxy_jump": None if proxy_jump == "-" else proxy_jump,
+        "profile": profile,
+        "has_ssh_endpoint": remote == "1",
+        "forward_agent": forward == "1",
+    })
+json.dump({"schema_version": 1, "machines": machines}, sys.stdout, separators=(",", ":"))
+sys.stdout.write("\n")
+'
+    return
+  fi
   while IFS=$'\t' read -r a h u p _ profile remote _; do
+    [[ -n "$a" ]] || continue
     if [[ "$remote" == 0 ]]; then printf '%-20s profile-only  profile=%s\n' "$a" "$profile"
     else printf '%-20s %s@%s:%s  profile=%s\n' "$a" "$u" "$h" "$p" "$profile"; fi
-  done < <(rows)
+  done <<<"$row_data"
 }
 connect_machine(){
   local alias="$1" row h u p j profile remote forward
@@ -159,7 +205,7 @@ setup_target(){
 if [[ "${1:-}" == setup || ("${1:-}" == machines && "${2:-}" == connect) ]]; then self_update "$@"; fi
 case "${1:-help}" in
   help|-h|--help) help_text;;
-  machines) case "${2:-list}" in sync) machines_sync;; list) machines_list;; connect) [[ -n "${3:-}" ]] || die 'Alias required'; connect_machine "$3";; *) die 'Use sync, list or connect';; esac;;
+  machines) case "${2:-list}" in sync) machines_sync;; list) shift 2; machines_list "$@";; connect) [[ -n "${3:-}" ]] || die 'Alias required'; connect_machine "$3";; *) die 'Use sync, list or connect';; esac;;
   setup) shift; setup_target "$@";;
   *) help_text >&2; exit 1;;
 esac
