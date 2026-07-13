@@ -6,9 +6,11 @@ VPN="${1:-}"
 [[ ${EUID:-$(id -u)} -ne 0 ]] || { echo 'Run as a normal user, not root.' >&2; exit 1; }
 source /etc/os-release
 case "$ID" in ubuntu|debian) ;; *) echo 'Ubuntu/Debian required' >&2; exit 1;; esac
-sudo apt-get update
-sudo DEBIAN_FRONTEND=noninteractive apt-get --fix-broken install -y
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tmux curl ca-certificates
+if ! command -v tmux >/dev/null 2>&1; then
+  sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+  sudo DEBIAN_FRONTEND=noninteractive apt-get --fix-broken install -y
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tmux
+fi
 mkdir -p "$STATE/logs"; chmod 700 "$STATE" "$STATE/logs"
 tmux has-session -t "$SESSION" 2>/dev/null && exec tmux attach-session -t "$SESSION"
 STAGE="$STATE/server-setup.sh"
@@ -16,7 +18,9 @@ cat >"$STAGE" <<STAGE2
 #!/usr/bin/env bash
 set -Eeuo pipefail
 sudo -v
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y git gh
+sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+sudo DEBIAN_FRONTEND=noninteractive apt-get --fix-broken install -y
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates git gh
 gh auth status -h github.com >/dev/null 2>&1 || gh auth login --hostname github.com --git-protocol https --web
 [[ \$(gh api user --jq .login) == toxyduck ]] || { echo 'Use GitHub account toxyduck' >&2; exit 1; }
 mkdir -p "\$HOME/dev"
