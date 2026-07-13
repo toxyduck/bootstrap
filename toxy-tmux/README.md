@@ -6,6 +6,19 @@ Termux and does not install an Android plugin APK.
 
 ## Installation
 
+> [!IMPORTANT]
+> `toxy-tmux` requires the classic Termux app from F-Droid or the official
+> Termux GitHub releases. **The Google Play Termux build is not supported:** it
+> does not include `RunCommandService`, so `toxy-tmux` cannot create terminal
+> sessions even if discovery and the background service are working.
+>
+> Back up the existing Termux home and SSH keys before changing sources.
+> Android cannot install the F-Droid/GitHub APK over the Google Play build
+> because they use different signing keys. Uninstall Termux and all Termux
+> plugins first, then install Termux and any plugins from the same source. The
+> recommended stable APK is
+> [Termux 0.118.3 from F-Droid](https://f-droid.org/repo/com.termux_1002.apk).
+
 The normal toxy bootstrap installs and enables this package automatically when
 run inside Termux:
 

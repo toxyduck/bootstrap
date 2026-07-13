@@ -7,6 +7,14 @@ machines through `toxy machines list` and mirrors their remote tmux sessions int
 the standard Termux session drawer. Fully restart Termux after the first install
 so the `termux-services` daemon starts.
 
+> [!IMPORTANT]
+> The session integration requires classic Termux from
+> [F-Droid](https://f-droid.org/repo/com.termux_1002.apk) or the official GitHub
+> releases. The Google Play build does not contain `RunCommandService` and cannot
+> open these sessions. Before switching sources, back up Termux, then uninstall
+> Termux and every Termux plugin; APKs and plugins from different sources have
+> incompatible signing keys and must not be mixed.
+
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/toxyduck/bootstrap/main/install.sh)"
 ```
