@@ -45,7 +45,7 @@ setup_target(){
   [[ -n "$target" ]] || target=$(choose)
   row=$(rows | awk -F '\t' -v a="$target" '$1==a {print; exit}')
   if [[ -n "$row" ]]; then IFS=$'\t' read -r _ h u p j <<< "$row"; args=(-p "$p"); [[ -z "$j" ]] || args+=(-J "$j"); target="$u@$h"; fi
-  ssh "${args[@]}" -t "$target" "curl -fsSL '$SERVER_URL' | bash -s -- $vpn"
+  ssh "${args[@]}" -t "$target" "tmp=\$(mktemp) && trap 'rm -f \"\$tmp\"' EXIT && curl -fsSL '$SERVER_URL' -o \"\$tmp\" && bash \"\$tmp\" $vpn"
 }
 case "${1:-help}" in
   help|-h|--help) help_text;;
