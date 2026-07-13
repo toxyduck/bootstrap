@@ -365,7 +365,16 @@ doctor() {
   else
     printf 'error: allow-external-apps=true is not configured\n'; failed=1
   fi
-  [[ -x "$PREFIX_DIR/var/service/toxy-tmux/run" ]] && printf 'ok: termux-services entry\n' || { printf 'error: service entry not installed\n'; failed=1; }
+  if [[ -x "$PREFIX_DIR/var/service/toxy-tmux/run" ]]; then
+    printf 'ok: termux-services entry\n'
+    if [[ -e "$PREFIX_DIR/var/service/toxy-tmux/supervise/ok" ]]; then
+      printf 'ok: termux-services supervisor\n'
+    else
+      printf 'error: termux-services supervisor is not running; reinstall toxy-tmux\n'; failed=1
+    fi
+  else
+    printf 'error: service entry not installed\n'; failed=1
+  fi
   return "$failed"
 }
 

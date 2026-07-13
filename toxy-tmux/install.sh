@@ -50,10 +50,24 @@ rm -f "$properties_tmp"
 termux-reload-settings 2>/dev/null || true
 
 rm -f "$service/down"
-if command -v sv >/dev/null 2>&1 && sv up toxy-tmux >/dev/null 2>&1; then
+services_profile="$PREFIX/etc/profile.d/start-services.sh"
+if [[ ! -r "$services_profile" ]]; then
+  echo "toxy-tmux: termux-services startup script not found: $services_profile" >&2
+  exit 1
+fi
+# Installing termux-services into an already running shell does not start its
+# runsvdir. Start it explicitly instead of relying on an app restart/profile.
+# shellcheck disable=SC1090
+source "$services_profile"
+for _ in $(seq 1 50); do
+  [[ -e "$service/supervise/ok" ]] && break
+  sleep 0.1
+done
+if [[ -e "$service/supervise/ok" ]] && sv up "$service" >/dev/null 2>&1; then
   echo 'toxy-tmux service enabled and started'
 else
-  echo 'toxy-tmux installed and enabled. Fully restart Termux to start the service daemon.'
+  echo 'toxy-tmux: service supervisor did not start' >&2
+  exit 1
 fi
 echo 'Security note: installer enabled allow-external-apps=true for Termux RUN_COMMAND support.'
 if ! command -v toxy >/dev/null 2>&1; then
