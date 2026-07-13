@@ -4,8 +4,46 @@ REPO=toxyduck/.dotenv
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/toxy"
 SSH_FILE="$HOME/.ssh/config.d/toxyduck-machines"
 SERVER_URL="${TOXY_SERVER_URL:-https://raw.githubusercontent.com/toxyduck/bootstrap/main/server.sh}"
+CLIENT_URL="${TOXY_CLIENT_URL:-https://raw.githubusercontent.com/toxyduck/bootstrap/main/toxy}"
 REMOTE_TERM="${TOXY_REMOTE_TERM:-xterm-256color}"
 die(){ echo "toxy: $*" >&2; exit 1; }
+ensure_forward_agent(){
+  local status agent_env="$STATE/ssh-agent.env"
+  if ssh-add -l >/dev/null 2>&1; then return 0; else status=$?; fi
+  if ((status == 2)) && [[ -f "$agent_env" ]]; then
+    # shellcheck disable=SC1090
+    source "$agent_env" >/dev/null
+    if ssh-add -l >/dev/null 2>&1; then return 0; else status=$?; fi
+  fi
+  if ((status == 2)); then
+    mkdir -p "$STATE"
+    chmod 700 "$STATE"
+    umask 077
+    ssh-agent -s > "$agent_env"
+    # shellcheck disable=SC1090
+    source "$agent_env" >/dev/null
+  fi
+  if ! ssh-add -l >/dev/null 2>&1; then ssh-add; fi
+  ssh-add -l >/dev/null 2>&1 || die 'SSH agent has no identities; add the key used for this machine with ssh-add'
+}
+self_update(){
+  [[ "${TOXY_SKIP_SELF_UPDATE:-}" != 1 ]] || return 0
+  local self dir home_client="" prefix_client="" installed="" tmp
+  dir=$(cd -P "$(dirname "$0")" && pwd)
+  self="$dir/$(basename "$0")"
+  if [[ -d "$HOME/.local/bin" ]]; then home_client="$(cd -P "$HOME/.local/bin" && pwd)/toxy"; fi
+  if [[ -n "${PREFIX:-}" && -d "$PREFIX/bin" ]]; then prefix_client="$(cd -P "$PREFIX/bin" && pwd)/toxy"; fi
+  if [[ -n "$home_client" && "$self" == "$home_client" ]]; then installed="$self"
+  elif [[ -n "$prefix_client" && "$self" == "$prefix_client" ]]; then installed="$self"
+  else return 0; fi
+  tmp=$(mktemp)
+  if ! curl -fsSL "$CLIENT_URL" -o "$tmp"; then rm -f "$tmp"; die 'Unable to update toxy client'; fi
+  if ! bash -n "$tmp"; then rm -f "$tmp"; die 'Downloaded toxy client is invalid'; fi
+  if cmp -s "$tmp" "$installed"; then rm -f "$tmp"; return 0; fi
+  install -m 755 "$tmp" "$installed"
+  rm -f "$tmp"
+  exec env TOXY_SKIP_SELF_UPDATE=1 "$installed" "$@"
+}
 help_text(){ cat <<'EOF'
 toxy
   toxy machines sync
@@ -83,7 +121,7 @@ connect_machine(){
   IFS=$'\t' read -r _ h u p j profile remote forward <<< "$row"
   [[ "$remote" == 1 ]] || die "Machine $alias has no SSH endpoint"
   local -a args=(-p "$p" -o "SetEnv=TERM=$REMOTE_TERM"); [[ "$j" == - ]] || args+=(-J "$j")
-  [[ "$forward" == 0 ]] || args+=(-A)
+  if [[ "$forward" != 0 ]]; then ensure_forward_agent; args+=(-A); fi
   exec ssh "${args[@]}" "$u@$h"
 }
 choose(){ machines_list >&2; read -r -p 'Machine alias or user@ip: ' target </dev/tty; [[ -n "$target" ]] || die 'Target required'; echo "$target"; }
@@ -113,11 +151,12 @@ setup_target(){
     IFS=$'\t' read -r _ h u p j profile remote forward <<< "$row"
     [[ "$remote" == 1 ]] || die "Machine $target has no SSH endpoint; use --local"
     args=(-p "$p"); [[ "$j" == - ]] || args+=(-J "$j"); target="$u@$h"
-    [[ "$forward" == 0 ]] || args+=(-A)
+    if [[ "$forward" != 0 ]]; then ensure_forward_agent; args+=(-A); fi
   fi
   args+=(-o "SetEnv=TERM=$REMOTE_TERM")
   ssh "${args[@]}" -t "$target" "tmp=\$(mktemp) && trap 'rm -f \"\$tmp\"' EXIT && curl -fsSL '$SERVER_URL' -o \"\$tmp\" && bash \"\$tmp\" --profile '$profile' $vpn"
 }
+if [[ "${1:-}" == setup || ("${1:-}" == machines && "${2:-}" == connect) ]]; then self_update "$@"; fi
 case "${1:-help}" in
   help|-h|--help) help_text;;
   machines) case "${2:-list}" in sync) machines_sync;; list) machines_list;; connect) [[ -n "${3:-}" ]] || die 'Alias required'; connect_machine "$3";; *) die 'Use sync, list or connect';; esac;;
