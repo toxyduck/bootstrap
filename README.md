@@ -16,4 +16,4 @@ toxy setup [alias|user@ip] [--vpn]
 toxy setup --local [--vpn]
 ```
 
-The client stays minimal. Full Git/Codex/Docker/dotfiles setup runs only on the selected server inside `toxy-bootstrap`.
+The client stays minimal. Git, Codex and dotfiles are installed on the selected server inside `toxy-bootstrap`. Docker, Docker Compose and VPN are installed only when setup is run with `--vpn`.
