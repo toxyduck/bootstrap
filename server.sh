@@ -12,7 +12,13 @@ if ! command -v tmux >/dev/null 2>&1; then
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tmux
 fi
 mkdir -p "$STATE/logs"; chmod 700 "$STATE" "$STATE/logs"
-tmux has-session -t "$SESSION" 2>/dev/null && exec tmux attach-session -t "$SESSION"
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  if [[ $(tmux display-message -p -t "$SESSION" '#{pane_dead}') == 1 ]]; then
+    tmux kill-session -t "$SESSION"
+  else
+    exec tmux attach-session -t "$SESSION"
+  fi
+fi
 STAGE="$STATE/server-setup.sh"
 cat >"$STAGE" <<STAGE2
 #!/usr/bin/env bash
@@ -21,7 +27,10 @@ sudo -v
 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
 sudo DEBIAN_FRONTEND=noninteractive apt-get --fix-broken install -y
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates git gh
-gh auth status -h github.com >/dev/null 2>&1 || gh auth login --hostname github.com --git-protocol https --web
+if ! gh auth status -h github.com >/dev/null 2>&1; then
+  gh auth login --hostname github.com --web
+  gh config set -h github.com git_protocol https 2>/dev/null || gh config set git_protocol https
+fi
 [[ \$(gh api user --jq .login) == toxyduck ]] || { echo 'Use GitHub account toxyduck' >&2; exit 1; }
 mkdir -p "\$HOME/dev"
 if [[ -d "\$HOME/dev/.dotenv/.git" ]]; then
