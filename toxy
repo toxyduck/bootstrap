@@ -55,7 +55,9 @@ EOF
 }
 auth(){
   if ! gh auth status -h github.com >/dev/null 2>&1; then
-    [[ "${TOXY_NONINTERACTIVE:-}" != 1 && -t 0 && -t 1 ]] || die 'GitHub authentication required; run toxy machines sync interactively'
+    # stdout may be captured by a caller; an interactive stdin is sufficient
+    # for the browser/device authentication flow.
+    [[ "${TOXY_NONINTERACTIVE:-}" != 1 && -t 0 ]] || die 'GitHub authentication required; run toxy machines sync interactively'
     gh auth login --hostname github.com --web
     gh config set -h github.com git_protocol https 2>/dev/null || gh config set git_protocol https
   fi
@@ -97,13 +99,17 @@ PY
 }
 machine_row(){ rows | awk -F '\t' -v a="$1" '$1==a {print; exit}'; }
 machines_sync(){
+  local tmp row_data filtered_tmp main_tmp
+  # Collect inventory before touching SSH config. Process substitutions hide a
+  # failing producer, which previously turned auth failures into false success.
+  if ! row_data=$(rows); then return 1; fi
   mkdir -p "$HOME/.ssh/config.d"; chmod 700 "$HOME/.ssh"; tmp=$(mktemp)
   { echo '# Managed by toxy'; while IFS=$'\t' read -r a h u p j profile remote forward; do
       [[ "$remote" == 0 ]] && continue
       printf '\nHost %s\n  HostName %s\n  User %s\n  Port %s\n  SetEnv TERM=%s\n' "$a" "$h" "$u" "$p" "$REMOTE_TERM"
       [[ "$j" == - ]] || printf '  ProxyJump %s\n' "$j"
       [[ "$forward" == 0 ]] || printf '  ForwardAgent yes\n'
-    done < <(rows); } > "$tmp"
+    done <<<"$row_data"; } > "$tmp"
   install -m 600 "$tmp" "$SSH_FILE"; rm -f "$tmp"; touch "$HOME/.ssh/config"; chmod 600 "$HOME/.ssh/config"
   filtered_tmp=$(mktemp); sed "/^Include .*config\.d\/\*$/d" "$HOME/.ssh/config" > "$filtered_tmp"
   main_tmp=$(mktemp); { printf "Include %s/.ssh/config.d/*\n\n" "$HOME"; cat "$filtered_tmp"; } > "$main_tmp"
