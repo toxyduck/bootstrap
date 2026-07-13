@@ -29,8 +29,9 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get --fix-broken install -y
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates git gh
 if ! gh auth status -h github.com >/dev/null 2>&1; then
   gh auth login --hostname github.com --web
-  gh config set -h github.com git_protocol https 2>/dev/null || gh config set git_protocol https
 fi
+gh config set -h github.com git_protocol https 2>/dev/null || gh config set git_protocol https
+gh auth setup-git
 [[ \$(gh api user --jq .login) == toxyduck ]] || { echo 'Use GitHub account toxyduck' >&2; exit 1; }
 mkdir -p "\$HOME/dev"
 if [[ -d "\$HOME/dev/.dotenv/.git" ]]; then
