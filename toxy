@@ -12,7 +12,7 @@ toxy
   toxy machines list
   toxy machines connect <alias>
   toxy setup [alias|user@ip] [--vpn]
-  toxy setup --local [--vpn]
+  toxy setup --local <alias> [--vpn]
 EOF
 }
 auth(){
@@ -27,35 +27,92 @@ rows(){
   if [[ -n "${TOXY_INVENTORY_FILE:-}" ]]; then file="$TOXY_INVENTORY_FILE"
   else auth; mkdir -p "$STATE"; file="$STATE/machines.toml"; gh api "repos/$REPO/contents/config/machines.toml" --jq .content | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read()))' > "$file"; fi
   python3 - "$file" <<'PY'
-import sys,tomllib
-for m in tomllib.load(open(sys.argv[1],'rb')).get('machines',[]):
- print('\t'.join([m['alias'],m['hostname'],m['user'],str(m.get('port',22)),m.get('proxy_jump','')]))
+import re, sys, tomllib
+
+machines = tomllib.load(open(sys.argv[1], 'rb')).get('machines', [])
+seen = set()
+for m in machines:
+    alias = m.get('alias', '')
+    profile = m.get('profile', '')
+    has_hostname = bool(m.get('hostname'))
+    has_user = bool(m.get('user'))
+    if not alias or alias in seen:
+        raise SystemExit(f'invalid or duplicate machine alias: {alias!r}')
+    if not re.fullmatch(r'[a-z0-9][a-z0-9_-]*', profile):
+        raise SystemExit(f'invalid profile for {alias}: {profile!r}')
+    if has_hostname != has_user:
+        raise SystemExit(f'machine {alias} must define both hostname and user, or neither')
+    seen.add(alias)
+    values = [
+        alias,
+        m.get('hostname', '-'),
+        m.get('user', '-'),
+        str(m.get('port', 22)),
+        m.get('proxy_jump', '-'),
+        profile,
+        '1' if has_hostname else '0',
+    ]
+    print('\t'.join(values))
 PY
 }
+machine_row(){ rows | awk -F '\t' -v a="$1" '$1==a {print; exit}'; }
 machines_sync(){
   mkdir -p "$HOME/.ssh/config.d"; chmod 700 "$HOME/.ssh"; tmp=$(mktemp)
-  { echo '# Managed by toxy'; while IFS=$'\t' read -r a h u p j; do printf '\nHost %s\n  HostName %s\n  User %s\n  Port %s\n  SetEnv TERM=%s\n' "$a" "$h" "$u" "$p" "$REMOTE_TERM"; [[ -z "$j" ]] || printf '  ProxyJump %s\n' "$j"; done < <(rows); } > "$tmp"
+  { echo '# Managed by toxy'; while IFS=$'\t' read -r a h u p j profile remote; do
+      [[ "$remote" == 0 ]] && continue
+      printf '\nHost %s\n  HostName %s\n  User %s\n  Port %s\n  SetEnv TERM=%s\n' "$a" "$h" "$u" "$p" "$REMOTE_TERM"
+      [[ "$j" == - ]] || printf '  ProxyJump %s\n' "$j"
+    done < <(rows); } > "$tmp"
   install -m 600 "$tmp" "$SSH_FILE"; rm -f "$tmp"; touch "$HOME/.ssh/config"; chmod 600 "$HOME/.ssh/config"
   filtered_tmp=$(mktemp); sed "/^Include .*config\.d\/\*$/d" "$HOME/.ssh/config" > "$filtered_tmp"
   main_tmp=$(mktemp); { printf "Include %s/.ssh/config.d/*\n\n" "$HOME"; cat "$filtered_tmp"; } > "$main_tmp"
   install -m 600 "$main_tmp" "$HOME/.ssh/config"; rm -f "$filtered_tmp" "$main_tmp"
   echo 'SSH presets updated'
 }
-machines_list(){ rows | awk -F '\t' '{printf "%-20s %s@%s:%s\n",$1,$3,$2,$4}'; }
+machines_list(){
+  while IFS=$'\t' read -r a h u p _ profile remote; do
+    if [[ "$remote" == 0 ]]; then printf '%-20s profile-only  profile=%s\n' "$a" "$profile"
+    else printf '%-20s %s@%s:%s  profile=%s\n' "$a" "$u" "$h" "$p" "$profile"; fi
+  done < <(rows)
+}
 connect_machine(){
-  local alias="$1" row h u p j; row=$(rows | awk -F '\t' -v a="$alias" '$1==a {print; exit}'); [[ -n "$row" ]] || die "Unknown alias: $alias"
-  IFS=$'\t' read -r _ h u p j <<< "$row"; local -a args=(-p "$p" -o "SetEnv=TERM=$REMOTE_TERM"); [[ -z "$j" ]] || args+=(-J "$j"); exec ssh "${args[@]}" "$u@$h"
+  local alias="$1" row h u p j profile remote
+  row=$(machine_row "$alias"); [[ -n "$row" ]] || die "Unknown alias: $alias"
+  IFS=$'\t' read -r _ h u p j profile remote <<< "$row"
+  [[ "$remote" == 1 ]] || die "Machine $alias has no SSH endpoint"
+  local -a args=(-p "$p" -o "SetEnv=TERM=$REMOTE_TERM"); [[ "$j" == - ]] || args+=(-J "$j")
+  exec ssh "${args[@]}" "$u@$h"
 }
 choose(){ machines_list >&2; read -r -p 'Machine alias or user@ip: ' target </dev/tty; [[ -n "$target" ]] || die 'Target required'; echo "$target"; }
+run_local_setup(){
+  local alias="$1" vpn="$2" row profile remote tmp
+  row=$(machine_row "$alias"); [[ -n "$row" ]] || die "Unknown alias: $alias"
+  IFS=$'\t' read -r _ _ _ _ _ profile remote <<< "$row"
+  local result
+  tmp=$(mktemp)
+  curl -fsSL "$SERVER_URL" -o "$tmp"
+  if [[ -n "$vpn" ]]; then
+    if bash "$tmp" --profile "$profile" "$vpn"; then result=0; else result=$?; fi
+  else
+    if bash "$tmp" --profile "$profile"; then result=0; else result=$?; fi
+  fi
+  rm -f "$tmp"
+  return "$result"
+}
 setup_target(){
-  local target="" local_mode=0 vpn="" row h u p j; local -a args=()
+  local target="" local_mode=0 vpn="" row h u p j profile remote; local -a args=()
   while (($#)); do case "$1" in --local) local_mode=1;; --vpn) vpn=--vpn;; *) [[ -z "$target" ]] || die 'One target only'; target="$1";; esac; shift; done
-  if ((local_mode)); then bash -c "$(curl -fsSL "$SERVER_URL")" -- "$vpn"; return; fi
+  if ((local_mode)); then [[ -n "$target" ]] || die 'Local setup requires an alias: toxy setup --local <alias>'; run_local_setup "$target" "$vpn"; return; fi
   [[ -n "$target" ]] || target=$(choose)
-  row=$(rows | awk -F '\t' -v a="$target" '$1==a {print; exit}')
-  if [[ -n "$row" ]]; then IFS=$'\t' read -r _ h u p j <<< "$row"; args=(-p "$p"); [[ -z "$j" ]] || args+=(-J "$j"); target="$u@$h"; fi
+  profile=base
+  row=$(machine_row "$target")
+  if [[ -n "$row" ]]; then
+    IFS=$'\t' read -r _ h u p j profile remote <<< "$row"
+    [[ "$remote" == 1 ]] || die "Machine $target has no SSH endpoint; use --local"
+    args=(-p "$p"); [[ "$j" == - ]] || args+=(-J "$j"); target="$u@$h"
+  fi
   args+=(-o "SetEnv=TERM=$REMOTE_TERM")
-  ssh "${args[@]}" -t "$target" "tmp=\$(mktemp) && trap 'rm -f \"\$tmp\"' EXIT && curl -fsSL '$SERVER_URL' -o \"\$tmp\" && bash \"\$tmp\" $vpn"
+  ssh "${args[@]}" -t "$target" "tmp=\$(mktemp) && trap 'rm -f \"\$tmp\"' EXIT && curl -fsSL '$SERVER_URL' -o \"\$tmp\" && bash \"\$tmp\" --profile '$profile' $vpn"
 }
 case "${1:-help}" in
   help|-h|--help) help_text;;
