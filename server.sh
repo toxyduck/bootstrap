@@ -71,11 +71,17 @@ gh config set -h github.com git_protocol https 2>/dev/null || gh config set git_
 gh auth setup-git
 [[ \$(gh api user --jq .login) == toxyduck ]] || { echo 'Use GitHub account toxyduck' >&2; exit 1; }
 mkdir -p "\$(dirname "\$root")"
-if [[ -d "\$root/.git" ]]; then
+if git -C "\$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  repo_url=\$(git -C "\$root" remote get-url origin 2>/dev/null || true)
+  case "\$repo_url" in
+    git@github.com:toxyduck/.dotenv.git|https://github.com/toxyduck/.dotenv.git|https://github.com/toxyduck/.dotenv) ;;
+    *) echo "TOXY_ROOT points to a different repository: \$root (origin: \${repo_url:-missing})" >&2; exit 1;;
+  esac
   git -C "\$root" remote set-url origin https://github.com/toxyduck/.dotenv.git
   branch=\$(git -C "\$root" branch --show-current)
   [[ "\$branch" != main ]] || git -C "\$root" pull --ff-only origin main
 else
+  [[ ! -e "\$root" ]] || { echo "TOXY_ROOT exists but is not the dotfiles repository: \$root" >&2; exit 1; }
   gh repo clone toxyduck/.dotenv "\$root"
 fi
 chmod +x "\$root/bin/toxy-server" "\$root/vpn/start.sh"
