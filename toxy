@@ -7,6 +7,7 @@ SERVER_URL="${TOXY_SERVER_URL:-https://raw.githubusercontent.com/toxyduck/bootst
 CLIENT_URL="${TOXY_CLIENT_URL:-https://raw.githubusercontent.com/toxyduck/bootstrap/main/toxy}"
 REMOTE_TERM="${TOXY_REMOTE_TERM:-xterm-256color}"
 die(){ echo "toxy: $*" >&2; exit 1; }
+warn(){ echo "toxy: warning: $*" >&2; }
 ensure_forward_agent(){
   local status agent_env="$STATE/ssh-agent.env"
   if ssh-add -l >/dev/null 2>&1; then return 0; else status=$?; fi
@@ -54,19 +55,59 @@ toxy
 EOF
 }
 auth(){
-  if ! gh auth status -h github.com >/dev/null 2>&1; then
+  if ! gh auth status -h github.com >/dev/null; then
     # stdout may be captured by a caller; an interactive stdin is sufficient
     # for the browser/device authentication flow.
-    [[ "${TOXY_NONINTERACTIVE:-}" != 1 && -t 0 ]] || die 'GitHub authentication required; run toxy machines sync interactively'
-    gh auth login --hostname github.com --web
-    gh config set -h github.com git_protocol https 2>/dev/null || gh config set git_protocol https
+    if [[ "${TOXY_NONINTERACTIVE:-}" == 1 || ! -t 0 ]]; then
+      echo 'GitHub authentication required; run toxy machines sync interactively' >&2
+      return 1
+    fi
+    gh auth login --hostname github.com --web || return 1
+    gh config set -h github.com git_protocol https 2>/dev/null || gh config set git_protocol https || return 1
   fi
-  [[ $(gh api user --jq .login) == toxyduck ]] || die 'Use GitHub account toxyduck'
+  local login
+  login=$(gh api user --jq .login) || return 1
+  if [[ "$login" != toxyduck ]]; then
+    echo 'Use GitHub account toxyduck' >&2
+    return 1
+  fi
 }
 rows(){
-  local file
+  local file tmp error_file log_file status
   if [[ -n "${TOXY_INVENTORY_FILE:-}" ]]; then file="$TOXY_INVENTORY_FILE"
-  else auth; mkdir -p "$STATE"; file="$STATE/machines.toml"; gh api "repos/$REPO/contents/config/machines.toml" --jq .content | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read()))' > "$file"; fi
+  else
+    mkdir -p "$STATE/logs"
+    chmod 700 "$STATE" "$STATE/logs"
+    file="$STATE/machines.toml"
+    tmp=$(mktemp "$STATE/machines.toml.XXXXXX")
+    error_file=$(mktemp "$STATE/registry-error.XXXXXX")
+    status=0
+    if auth 2>"$error_file"; then
+      gh api "repos/$REPO/contents/config/machines.toml" --jq .content 2>>"$error_file" \
+        | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read()))' > "$tmp" 2>>"$error_file" || status=$?
+    else
+      status=$?
+    fi
+    if ((status == 0)) && [[ -s "$tmp" ]]; then
+      mv "$tmp" "$file"
+    else
+      [[ $status != 0 ]] || status=1
+      log_file="$STATE/logs/client.log"
+      {
+        printf '%s registry refresh failed (exit %s)\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$status"
+        sed 's/^/  /' "$error_file"
+      } >> "$log_file"
+      rm -f "$tmp"
+      if [[ -s "$file" ]]; then
+        warn "GitHub registry refresh failed; using cached registry. Details: $log_file"
+      else
+        cat "$error_file" >&2
+        rm -f "$error_file"
+        die "Unable to refresh machine registry and no cached registry exists. Details: $log_file"
+      fi
+    fi
+    rm -f "$error_file"
+  fi
   python3 - "$file" <<'PY'
 import re, sys, tomllib
 
